@@ -1,8 +1,10 @@
+import 'regenerator-runtime/runtime'; // Required for speech recognition
 import { useState, useEffect, useRef } from "react";
 import ReactMarkdown from 'react-markdown';
 import { motion, AnimatePresence } from "framer-motion";
-import { Paperclip, Send, MessageSquare, Plus, Menu, X, Users, History, LogOut, Trash2, ArrowLeft, Database } from "lucide-react";
-import { Link, useLocation } from "react-router-dom";
+import { Send, MessageSquare, Plus, Menu, X, Users, History, LogOut, Trash2, ArrowLeft, Database, Mic, MicOff } from "lucide-react";
+import { Link } from "react-router-dom";
+import SpeechRecognition, { useSpeechRecognition } from 'react-speech-recognition';
 import InteractiveParticles from "../components/InteractiveParticles";
 import ProfileModal from "../components/ProfileModal";
 
@@ -48,24 +50,30 @@ export default function Dashboard({ lang, setLang, user, onLogout }) {
   const t = translations[lang] || translations.EN;
   const chatEndRef = useRef(null);
 
+  // --- SPEECH RECOGNITION HOOKS ---
+  const { transcript, listening, resetTranscript, browserSupportsSpeechRecognition } = useSpeechRecognition();
+
   const [currentChatId, setCurrentChatId] = useState(() => localStorage.getItem("sla_active_chat_id") || null);
-  
   const [messages, setMessages] = useState(() => {
     const saved = localStorage.getItem("sla_active_chat");
-    // FIX: Force isNew to false on initial load just in case old data is stuck
     return saved ? JSON.parse(saved).map(m => ({ ...m, isNew: false })) : [{ role: "ai", content: t.aiGreeting }];
   });
 
   useEffect(() => { fetchHistory(); }, [user]);
 
   useEffect(() => {
-    // FIX: Strip out 'isNew' before saving to local storage so it doesn't animate on refresh
     const cleanMessages = messages.map(({ isNew, ...rest }) => rest);
     localStorage.setItem("sla_active_chat", JSON.stringify(cleanMessages));
-    
     if (currentChatId) localStorage.setItem("sla_active_chat_id", currentChatId);
     chatEndRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [messages, currentChatId, isWaitingForAI]);
+
+  // --- SYNC VOICE TRANSCRIPT WITH INPUT BOX ---
+  useEffect(() => {
+    if (listening) {
+      setQuery(transcript);
+    }
+  }, [transcript, listening]);
 
   const fetchHistory = async () => {
     if (!user?.email) return;
@@ -76,12 +84,30 @@ export default function Dashboard({ lang, setLang, user, onLogout }) {
     } catch (err) { console.error(err); }
   };
 
+  // --- TOGGLE VOICE RECOGNITION ---
+  const handleVoiceToggle = () => {
+    if (listening) {
+      SpeechRecognition.stopListening();
+    } else {
+      resetTranscript();
+      setQuery(""); // Clear the box when starting a new voice note
+      // Map user language preference to browser speech codes
+      const speechLang = lang === 'HI' ? 'hi-IN' : lang === 'TE' ? 'te-IN' : 'en-IN';
+      SpeechRecognition.startListening({ continuous: true, language: speechLang });
+    }
+  };
+
   const handleSend = async () => {
     if (!query.trim() || isWaitingForAI) return;
+    
+    // Stop listening when the user hits send
+    if (listening) SpeechRecognition.stopListening();
+    
     const userMsg = { role: "user", content: query };
     const updatedMessages = [...messages, userMsg];
     setMessages(updatedMessages);
     setQuery("");
+    resetTranscript(); // Clear out the voice memory
     setIsWaitingForAI(true);
 
     try {
@@ -100,9 +126,7 @@ export default function Dashboard({ lang, setLang, user, onLogout }) {
       setIsWaitingForAI(false); 
 
       if (response.ok) {
-        // FIX: Strip 'isNew' before sending to MongoDB so history doesn't animate
         const messagesToSave = finalMessages.map(({ isNew, ...rest }) => rest);
-        
         const saveRes = await fetch("http://localhost:5000/api/save_chat", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
@@ -173,12 +197,9 @@ export default function Dashboard({ lang, setLang, user, onLogout }) {
             <div className="space-y-1 px-2">
               {history.map(item => (
                 <div key={item._id} className="relative group w-full flex items-center">
-                  
-                  {/* FIX: Force isNew to false when loading from sidebar history */}
                   <button onClick={() => { setMessages(item.messages.map(m => ({ ...m, isNew: false }))); setCurrentChatId(item._id); }} className="flex-1 px-4 py-3 rounded-xl hover:bg-white/80 text-left transition-all">
                     <span className="text-sm font-semibold block truncate text-slate-800">{item.title}</span>
                   </button>
-                  
                   <Trash2 onClick={(e) => deleteHistoryItem(item._id, e)} size={14} className="absolute right-2 opacity-0 group-hover:opacity-100 text-red-400 cursor-pointer"/>
                 </div>
               ))}
@@ -208,30 +229,20 @@ export default function Dashboard({ lang, setLang, user, onLogout }) {
             {messages.map((msg, index) => (
               <motion.div key={index} initial={{ opacity: 0, y: 20 }} animate={{ opacity: 1, y: 0 }} className={`flex ${msg.role === "user" ? "justify-end" : "justify-start"}`}>
                 <div className={`px-6 py-4 rounded-[2rem] shadow-sm max-w-[85%] text-sm md:text-base ${msg.role === "user" ? "bg-slate-900 text-white rounded-tr-none" : "bg-white/90 border border-white text-slate-900 font-semibold rounded-tl-none"}`}>
-                   
                    {msg.role === "ai" && msg.isNew ? (
                      <TypewriterMarkdown content={msg.content} scrollRef={chatEndRef} />
                    ) : (
                      <ReactMarkdown>{msg.content}</ReactMarkdown>
                    )}
-
                 </div>
               </motion.div>
             ))}
 
             {isWaitingForAI && (
-              <motion.div 
-                key="loader"
-                initial={{ opacity: 0, y: 20, scale: 0.95 }} 
-                animate={{ opacity: 1, y: 0, scale: 1 }} 
-                exit={{ opacity: 0, scale: 0.95 }} 
-                className="flex justify-start"
-              >
+              <motion.div key="loader" initial={{ opacity: 0, y: 20, scale: 0.95 }} animate={{ opacity: 1, y: 0, scale: 1 }} exit={{ opacity: 0, scale: 0.95 }} className="flex justify-start">
                 <div className="px-6 py-4 rounded-[2rem] shadow-sm max-w-[85%] bg-white/90 border border-white rounded-tl-none flex items-center gap-4">
                   <Database size={16} className="text-blue-500 animate-pulse" />
-                  <span className="text-sm font-bold text-slate-500 bg-gradient-to-r from-slate-500 to-slate-400 bg-clip-text text-transparent animate-pulse">
-                    {t.analyzing}
-                  </span>
+                  <span className="text-sm font-bold text-slate-500 bg-gradient-to-r from-slate-500 to-slate-400 bg-clip-text text-transparent animate-pulse">{t.analyzing}</span>
                   <div className="flex gap-1 ml-1">
                     <motion.div animate={{ y: [0, -4, 0] }} transition={{ repeat: Infinity, duration: 0.6, delay: 0 }} className="w-1.5 h-1.5 bg-slate-400 rounded-full" />
                     <motion.div animate={{ y: [0, -4, 0] }} transition={{ repeat: Infinity, duration: 0.6, delay: 0.2 }} className="w-1.5 h-1.5 bg-slate-400 rounded-full" />
@@ -246,8 +257,33 @@ export default function Dashboard({ lang, setLang, user, onLogout }) {
 
         <div className="p-4 md:px-0 md:pb-4">
           <div className="max-w-4xl mx-auto bg-white/85 backdrop-blur-3xl border border-white shadow-xl rounded-full p-2 flex items-center gap-3">
-            <input type="text" value={query} onChange={e => setQuery(e.target.value)} onKeyDown={e => e.key === "Enter" && handleSend()} placeholder={t.placeholder} className="flex-1 bg-transparent border-none outline-none font-bold text-sm md:text-base px-6" />
-            <button onClick={handleSend} disabled={isWaitingForAI} className="p-4 bg-slate-900 text-white rounded-full active:scale-90 disabled:opacity-50"><Send size={20}/></button>
+            
+            {/* --- VOICE INPUT BUTTON --- */}
+            {browserSupportsSpeechRecognition && (
+              <button 
+                onClick={handleVoiceToggle} 
+                className={`p-3 rounded-full transition-all flex items-center justify-center ml-2 ${listening ? 'bg-red-50 text-red-500 animate-pulse' : 'text-slate-400 hover:bg-slate-100 hover:text-slate-900'}`}
+                title={listening ? "Stop recording" : "Use Voice"}
+              >
+                {listening ? <MicOff size={20} /> : <Mic size={20} />}
+              </button>
+            )}
+
+            <input 
+              type="text" 
+              value={query} 
+              onChange={e => setQuery(e.target.value)} 
+              onKeyDown={e => e.key === "Enter" && handleSend()} 
+              placeholder={listening ? "Listening..." : t.placeholder} 
+              className="flex-1 bg-transparent border-none outline-none font-bold text-sm md:text-base px-2 md:px-4" 
+            />
+            <button 
+              onClick={handleSend} 
+              disabled={isWaitingForAI || (!query.trim() && !listening)} 
+              className="p-4 bg-slate-900 text-white rounded-full active:scale-90 disabled:opacity-50"
+            >
+              <Send size={20}/>
+            </button>
           </div>
         </div>
       </main>
